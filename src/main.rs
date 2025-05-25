@@ -23,7 +23,7 @@ use chrono::{ Utc, Duration };
 use bcrypt::verify;
 // use bcrypt::{ hash, verify, DEFAULT_COST };
 
-#[derive(Deserialize, Serialize, sqlx::FromRow)]
+#[derive(Serialize, sqlx::FromRow)]
 struct Todo {
     id: i32,
     name: String,
@@ -32,6 +32,13 @@ struct Todo {
 
 #[derive(Deserialize)]
 struct NewTodo {
+    name: String,
+    iscomplete: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdateTodo {
+    id: i32,
     name: String,
     iscomplete: bool,
 }
@@ -153,6 +160,22 @@ async fn get_todos(pool: web::Data<Pool<Postgres>>) -> impl Responder {
     }
 }
 
+#[get("api/todos/{id}")]
+async fn get_todo(pool: web::Data<Pool<Postgres>>, path: web::Path<i32>) -> impl Responder {
+    let id = path.into_inner();
+
+    let result = sqlx
+        ::query_as::<_, Todo>("select id, name, iscomplete from public.todos where id = $1")
+        .bind(id)
+        .fetch_optional(pool.get_ref()).await;
+
+    match result {
+        Ok(Some(todo)) => HttpResponse::Ok().json(todo),
+        Ok(None) => HttpResponse::NotFound().body(format!("Item with id {} not found", id)),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
+    }
+}
+
 #[post("/api/todos")]
 async fn create_todo(
     pool: web::Data<Pool<Postgres>>,
@@ -175,9 +198,14 @@ async fn create_todo(
 }
 
 #[put("api/todos")]
-async fn update_todo(pool: web::Data<Pool<Postgres>>, todo: web::Json<Todo>) -> impl Responder {
+async fn update_todo(
+    pool: web::Data<Pool<Postgres>>,
+    todo: web::Json<UpdateTodo>
+) -> impl Responder {
     let result = sqlx
-        ::query_as::<_, Todo>("update public.todos set name = $2, iscomplete = $3 where id = $1")
+        ::query_as::<_, Todo>(
+            "update public.todos set name = $2, iscomplete = $3 where id = $1 returning id, name, iscomplete"
+        )
         .bind(&todo.id)
         .bind(&todo.name)
         .bind(&todo.iscomplete)
@@ -186,6 +214,22 @@ async fn update_todo(pool: web::Data<Pool<Postgres>>, todo: web::Json<Todo>) -> 
     match result {
         Ok(Some(todo)) => HttpResponse::Ok().json(todo),
         Ok(None) => HttpResponse::NotFound().body("Todo not found"),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
+    }
+}
+
+#[delete("/api/todos/{id}")]
+async fn delete_todo(pool: web::Data<Pool<Postgres>>, path: web::Path<i32>) -> impl Responder {
+    let id = path.into_inner();
+
+    let result = sqlx
+        ::query("delete from public.todos where id = $1")
+        .bind(id)
+        .execute(pool.get_ref()).await;
+
+    match result {
+        Ok(res) if res.rows_affected() > 0 => HttpResponse::Ok().body("Todo deleted"),
+        Ok(_) => HttpResponse::NotFound().body("Todo not found"),
         Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
     }
 }
@@ -216,8 +260,10 @@ async fn main() -> std::io::Result<()> {
                     ::scope("")
                     .wrap(from_fn(jwt_middleware))
                     .service(get_todos)
+                    .service(get_todo)
                     .service(create_todo)
                     .service(update_todo)
+                    .service(delete_todo)
             )
     })
         .bind(("127.0.0.1", 8080))?
